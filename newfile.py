@@ -25,23 +25,18 @@ class SecureTelemetryProxy:
 
     def package_and_encrypt(self, payload_data: dict) -> dict:
         """Executes local zero-knowledge encryption and envelope generation."""
-        # 1. Dynamic Cryptographic Salting & Nonce Generation
         salt = os.urandom(32)
         nonce = os.urandom(12)
 
-        # Inject temporal metadata for sliding-window replay protection
         payload_data['utc_timestamp'] = time.time()
         payload_data['nonce_sig'] = base64.b64encode(nonce).decode('utf-8')
 
-        # 2. Deterministic JSON Serialization (eliminates cross-runtime parsing discrepancies)
         serialized_payload = json.dumps(payload_data, sort_keys=True).encode('utf-8')
 
-        # 3. Authenticated Encryption via AES-GCM
         derived_key = self._derive_key(salt)
         aesgcm = AESGCM(derived_key)
         ciphertext = aesgcm.encrypt(nonce, serialized_payload, associated_data=None)
 
-        # Construct transmission envelope
         transmission_envelope = {
             'salt': base64.b64encode(salt).decode('utf-8'),
             'nonce': base64.b64encode(nonce).decode('utf-8'),
@@ -55,12 +50,10 @@ class SecureTelemetryProxy:
         nonce = base64.b64decode(envelope['nonce'])
         ciphertext = base64.b64decode(envelope['ciphertext'])
 
-        # Replay Vector Mitigation: Enforce nonce uniqueness check
         nonce_str = envelope['nonce']
         if nonce_str in self.processed_nonces:
             raise SecurityError("Replay attack detected: Nonce has already been processed.")
 
-        # Decrypt payload
         derived_key = self._derive_key(salt)
         aesgcm = AESGCM(derived_key)
         
@@ -71,12 +64,10 @@ class SecureTelemetryProxy:
 
         payload = json.loads(decrypted_bytes.decode('utf-8'))
 
-        # Temporal Window Verification
         current_time = time.time()
         if current_time - payload.get('utc_timestamp', 0) > max_age_seconds:
             raise TimeoutError("Packet timestamp exceeds the valid operational window.")
 
-        # Register nonce to prevent future replay execution
         self.processed_nonces.add(nonce_str)
         return payload
 
@@ -88,17 +79,15 @@ class DecryptionError(Exception):
 
 
 if __name__ == "__main__":
-    # Credential Isolation: Load secrets dynamically from secure environment variables
     MASTER_SEED = os.getenv("VAULT_MASTER_SECRET", "").encode('utf-8')
     
     if not MASTER_SEED:
         print("[!] Operational Warning: VAULT_MASTER_SECRET environment variable is uninitialized.")
-        # Fallback for local sandbox execution only
         MASTER_SEED = os.urandom(32)
 
-    proxy = SecureTelemetryProxy(master_seed=MASTER_SEED)
+    # Parameter corrected to master_secret
+    proxy = SecureTelemetryProxy(master_secret=MASTER_SEED)
 
-    # Simulate raw local telemetry input
     telemetry_input = {
         "sensor_id": "NODE_ALPHA_04",
         "diagnostic_status": "nominal",
