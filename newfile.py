@@ -1,77 +1,114 @@
 import os
+import time
+import json
+import base64
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
 
-class ClientSideVaultProxy:
-    """
-    Ensures zero-knowledge telemetry encapsulation by sanitizing raw inputs 
-    and encrypting payloads locally using keys unknown to the server layer.
-    """
-    def __init__(self, user_master_secret: bytes):
-        self.encryption_key = self._derive_local_key(user_master_secret)
+class SecureTelemetryProxy:
+    def __init__(self, master_secret: bytes):
+        if not master_secret or len(master_secret) < 16:
+            raise ValueError("Master secret must meet minimum entropy requirements.")
+        self.master_secret = master_secret
+        self.processed_nonces = set()
 
-    def _derive_local_key(self, secret: bytes) -> bytes:
+    def _derive_key(self, salt: bytes) -> bytes:
+        """Derives a cryptographic key using Argon2id with a dynamic salt."""
         kdf = Argon2id(
-            salt=b"hardware_bound_salt_v1", 
-            iterations=4, 
-            lanes=4, 
-            memory_cost=65536, 
-            length=32
+            salt=salt,
+            length=32,
+            iterations=3,
+            lanes=4,
+            memory_cost=65536,
         )
-        return kdf.derive(secret)
+        return kdf.derive(self.master_secret)
 
-    def sanitize_and_encrypt(self, raw_telemetry: dict) -> dict:
-        sanitized_payload = {
-            "metric_value": raw_telemetry.get("metric"),
-            "epoch_bucket": raw_telemetry.get("timestamp", 0) // 3600
-        }
-        payload_bytes = str(sanitized_payload).encode('utf-8')
+    def package_and_encrypt(self, payload_data: dict) -> dict:
+        """Executes local zero-knowledge encryption and envelope generation."""
+        # 1. Dynamic Cryptographic Salting & Nonce Generation
+        salt = os.urandom(32)
         nonce = os.urandom(12)
-        aesgcm = AESGCM(self.encryption_key)
-        ciphertext = aesgcm.encrypt(nonce, payload_bytes, associated_data=None)
-        return {
-            "ciphertext": ciphertext.hex(),
-            "nonce": nonce.hex()
+
+        # Inject temporal metadata for sliding-window replay protection
+        payload_data['utc_timestamp'] = time.time()
+        payload_data['nonce_sig'] = base64.b64encode(nonce).decode('utf-8')
+
+        # 2. Deterministic JSON Serialization (eliminates cross-runtime parsing discrepancies)
+        serialized_payload = json.dumps(payload_data, sort_keys=True).encode('utf-8')
+
+        # 3. Authenticated Encryption via AES-GCM
+        derived_key = self._derive_key(salt)
+        aesgcm = AESGCM(derived_key)
+        ciphertext = aesgcm.encrypt(nonce, serialized_payload, associated_data=None)
+
+        # Construct transmission envelope
+        transmission_envelope = {
+            'salt': base64.b64encode(salt).decode('utf-8'),
+            'nonce': base64.b64encode(nonce).decode('utf-8'),
+            'ciphertext': base64.b64encode(ciphertext).decode('utf-8')
         }
+        return transmission_envelope
 
-class BlindComputeEnclave:
-    """
-    Simulates a hardware-isolated memory enclave with zero persistent storage.
-    """
-    def __init__(self):
-        self.attestation_active = True
+    def verify_and_decrypt(self, envelope: dict, max_age_seconds: int = 300) -> dict:
+        """Validates temporal integrity, nonces, and decrypts the payload."""
+        salt = base64.b64decode(envelope['salt'])
+        nonce = base64.b64decode(envelope['nonce'])
+        ciphertext = base64.b64decode(envelope['ciphertext'])
 
-    def verify_remote_attestation(self, enclave_signature: str) -> bool:
-        return self.attestation_active and len(enclave_signature) > 0
+        # Replay Vector Mitigation: Enforce nonce uniqueness check
+        nonce_str = envelope['nonce']
+        if nonce_str in self.processed_nonces:
+            raise SecurityError("Replay attack detected: Nonce has already been processed.")
 
-    def execute_ephemeral_query(self, encrypted_payload: dict, query_logic) -> str:
-        if not self.attestation_active:
-            raise RuntimeError("Execution aborted: Hardware attestation failed.")
+        # Decrypt payload
+        derived_key = self._derive_key(salt)
+        aesgcm = AESGCM(derived_key)
         
-        aggregate_result = query_logic(encrypted_payload)
-        del encrypted_payload
-        return aggregate_result
+        try:
+            decrypted_bytes = aesgcm.decrypt(nonce, ciphertext, associated_data=None)
+        except Exception as e:
+            raise DecryptionError("Cryptographic authentication failed.") from e
+
+        payload = json.loads(decrypted_bytes.decode('utf-8'))
+
+        # Temporal Window Verification
+        current_time = time.time()
+        if current_time - payload.get('utc_timestamp', 0) > max_age_seconds:
+            raise TimeoutError("Packet timestamp exceeds the valid operational window.")
+
+        # Register nonce to prevent future replay execution
+        self.processed_nonces.add(nonce_str)
+        return payload
+
+class SecurityError(Exception):
+    pass
+
+class DecryptionError(Exception):
+    pass
+
 
 if __name__ == "__main__":
-    # Initialize the local client proxy
-    proxy = ClientSideVaultProxy(user_master_secret=b"user_secure_seed_phrase_2026")
+    # Credential Isolation: Load secrets dynamically from secure environment variables
+    MASTER_SEED = os.getenv("VAULT_MASTER_SECRET", "").encode('utf-8')
     
-    # Simulate raw telemetry input
-    raw_telemetry = {"metric": 1042, "timestamp": 1771410000}
-    
-    # Execute local encryption
-    encrypted_packet = proxy.sanitize_and_encrypt(raw_telemetry)
-    print("--- Client-Side Output ---")
-    print("Ciphertext:", encrypted_packet["ciphertext"][:32] + "...")
-    print("Nonce:", encrypted_packet["nonce"])
-    
-    # Initialize hardware enclave simulation
-    enclave = BlindComputeEnclave()
-    
-    # Execute blind-compute query
-    query_result = enclave.execute_ephemeral_query(
-        encrypted_packet, 
-        lambda payload: "Query Success: Macro-trend aggregated securely inside vault."
-    )
-    print("\n--- Enclave Execution ---")
-    print(query_result)
+    if not MASTER_SEED:
+        print("[!] Operational Warning: VAULT_MASTER_SECRET environment variable is uninitialized.")
+        # Fallback for local sandbox execution only
+        MASTER_SEED = os.urandom(32)
+
+    proxy = SecureTelemetryProxy(master_seed=MASTER_SEED)
+
+    # Simulate raw local telemetry input
+    telemetry_input = {
+        "sensor_id": "NODE_ALPHA_04",
+        "diagnostic_status": "nominal",
+        "pressure_psi": 142.5
+    }
+
+    print("[*] Executing local client-side encapsulation...")
+    encrypted_packet = proxy.package_and_encrypt(telemetry_input)
+    print(f"[+] Encrypted Envelope Generated: {list(encrypted_packet.keys())}")
+
+    print("[*] Simulating secure receiver ingestion and decryption...")
+    restored_payload = proxy.verify_and_decrypt(encrypted_packet)
+    print(f"[+] Verified Decrypted Payload: {restored_payload}")
