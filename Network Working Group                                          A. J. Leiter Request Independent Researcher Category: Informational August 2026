@@ -1,0 +1,78 @@
+Network Working Group                                          A. J. Leiter
+Request for Comments: 0001                                Independent Researcher
+Category: Informational                                           August 2026
+
+        Client Vault Proxy: Cryptographic Architecture Specification
+
+Status of This Memo
+   This memo provides information for the Internet community. It does not
+   specify an Internet standard of any kind. Distribution of this memo is
+   unlimited.
+
+Abstract
+   This document specifies the cryptographic architecture, primitive selection,
+   key derivation mechanisms, authenticated encryption modes, and serialization
+   protocols utilized within the Client Vault Proxy framework. The architecture
+   enforces strict cryptographic isolation between client-side encryption modules,
+   the persistence vault subsystem, and the server-side receiver interface.
+
+1. Introduction
+   The Client Vault Proxy framework establishes a secure, zero-trust boundary
+   for client-side data handling and encrypted storage. By decoupling cryptographic
+   operations from the server-side receiver, the architecture ensures that plaintext
+   data never traverses untrusted networks or storage mediums.
+
+2. Architectural Boundaries
+   - Client Module: Manages key generation, encryption, decryption, and local
+     cryptographic state transformations.
+   - Persistence Vault: Handles encrypted local ciphertext storage, state verification,
+     and secure serialization.
+   - Server Receiver: Acts as a stateless transport relay for authenticated,
+     encrypted payloads without access to decryption keys or plaintext material.
+
+3. Cryptographic Primitives
+   3.1 Symmetric Encryption
+       - Algorithm: AES (Advanced Encryption Standard) operating in Galois/Counter
+         Mode (GCM).
+       - Key Size: 256 bits (32 bytes).
+       - Nonce/IV Size: 96 bits (12 bytes), generated via cryptographically secure
+         pseudorandom number generators (CSPRNG, e.g., os.urandom).
+       - Authentication Tag: 128 bits (16 bytes), providing ciphertext integrity
+         and associated data authentication (AEAD).
+
+   3.2 Hashing and Message Digestion
+       - Algorithm: SHA-256 (Secure Hash Algorithm 2) for integrity checksums
+         and as the underlying primitive for key derivation.
+
+4. Key Derivation Functions (KDF)
+   4.1 Derivation Pipeline
+       - Primitive: HKDF (HMAC-based Extract-and-Expand Key Derivation Function)
+         utilizing SHA-256 as the underlying pseudo-random function (PRF).
+       - Input Key Material (IKM): Master secret entropy derived from client input.
+       - Salt: 256-bit cryptographically random salt unique to each vault instance.
+       - Info Parameter: Domain separation string specifying module context (e.g.,
+         "client_vault_proxy.encryption_key").
+
+5. Serialization and Wire Format
+   5.1 Payload Encapsulation
+       - Format: JSON-based structured serialization or binary message framing
+         incorporating explicit base64url encoding for binary fields (ciphertext,
+         nonce, authentication tag, salt).
+       - Field Specifications:
+         * version: Integer specifying protocol schema version.
+         * salt: Base64url-encoded 256-bit salt.
+         * nonce: Base64url-encoded 96-bit initialization vector.
+         * ciphertext: Base64url-encoded encrypted payload stream.
+         * tag: Base64url-encoded 128-bit authentication tag.
+
+6. Security Considerations
+   6.1 Nonce Reuse Prevention
+       - Implementations MUST ensure that nonces are never reused under the same
+         key. A 96-bit counter or random CSPRNG sampling combined with stateful
+         tracking mitigates collision vulnerabilities.
+   6.2 Side-Channel Mitigations
+       - Constant-time comparison routines MUST be utilized for authentication tag
+       validation to prevent timing attacks during transmission decryption.
+   6.3 Key Lifecycle
+       - Master secrets and derived session keys must be scrubbed from volatile
+       memory immediately upon session termination.
